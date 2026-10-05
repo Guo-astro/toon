@@ -156,7 +156,7 @@ When using the `--stats` flag with encode, the CLI builds the full TOON string o
 | `--indent <number>` | Indentation size (default: `2`) |
 | `--stats` | Show token count estimates and savings (encode only) |
 | `--no-strict` | Skip decode validation (array counts, indentation, header delimiter); last-write-wins on duplicate keys |
-| `--verbose` | Show full stack traces and cause chains for errors (default: `false`) |
+| `--verbose` | Print the stack trace on failure (default: `false`) |
 
 ## Advanced Examples
 
@@ -247,7 +247,7 @@ The CLI prints:
       ^
 ```
 
-The exit code is `1` on any error. Stack traces are suppressed by default. Pass `--verbose` to include the full stack and the underlying cause chain – useful when filing a bug report or diagnosing an unexpected error path:
+The exit code is `1` on any error. Stack traces are suppressed by default. Pass `--verbose` to include the full stack – useful when filing a bug report or diagnosing an unexpected error path:
 
 ```bash
 cat broken.toon | toon --decode --verbose

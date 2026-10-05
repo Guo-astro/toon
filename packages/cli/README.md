@@ -67,7 +67,7 @@ toon data.json --stats
 | `--indent <number>` | Indentation size (default: `2`) |
 | `--stats` | Show token count estimates and savings (encode only) |
 | `--no-strict` | Skip decode validation (array counts, indentation, header delimiter); last-write-wins on duplicate keys |
-| `--verbose` | Show full stack traces and cause chains for errors (default: `false`) |
+| `--verbose` | Print the stack trace on failure (default: `false`) |
 
 For token statistics output, delimiter guidance, lenient decoding, decode error rendering, and streaming behavior, see the [CLI documentation](https://toonformat.dev/cli/).
 
