@@ -1,5 +1,5 @@
 import type { ArrayHeaderInfo, DecodeStreamOptions, Depth, FieldNode, JsonPrimitive, JsonStreamEvent, ParsedLine } from '../types.ts'
-import type { LineReader, LineRule } from './line-reader.ts'
+import type { LineEffect, LineReader, LineRule } from './line-reader.ts'
 import type { ArrayHeaderParseResult } from './parser.ts'
 import { COLON, DEFAULT_DELIMITER, LIST_ITEM_MARKER, LIST_ITEM_PREFIX } from '../constants.ts'
 import { findUnquotedChar, trimSpaces } from '../shared/string-utils.ts'
@@ -42,7 +42,14 @@ export function decodeStream(
 // #region Document dispatch
 
 function* decodeDocument(reader: LineReader, options: DecoderContext): LineRule {
-  const first = yield* peekLine(reader)
+  let first = yield* peekLine(reader)
+  let skippedLeading = false
+  while (first && first.depth !== 0) {
+    yield* skipOverIndentedLine(reader, first, 0, options.strict)
+    skippedLeading = true
+    first = yield* peekLine(reader)
+  }
+
   if (!first) {
     yield { type: 'startObject' }
     yield { type: 'endObject' }
@@ -70,7 +77,8 @@ function* decodeDocument(reader: LineReader, options: DecoderContext): LineRule 
   yield* readLine(reader)
   const following = yield* peekLine(reader)
   const hasMore = following !== undefined
-  if (!hasMore && !isKeyValueContent(first.content)) {
+  // A skipped leading line makes the document multi-line, so no root primitive.
+  if (!hasMore && !skippedLeading && !isKeyValueContent(first.content)) {
     yield { type: 'primitive', value: withLine(first, () => parsePrimitiveToken(first.content)) }
     return
   }
@@ -93,11 +101,7 @@ function* decodeDocument(reader: LineReader, options: DecoderContext): LineRule 
     }
 
     if (line.depth !== 0) {
-      if (options.strict) {
-        throw overIndentedLineError(line, 0)
-      }
-      assertNotScalarLine(line)
-      yield* readLine(reader)
+      yield* skipOverIndentedLine(reader, line, 0, options.strict)
       continue
     }
 
@@ -128,11 +132,19 @@ function overIndentedLineError(line: ParsedLine, expectedDepth: Depth): ToonDeco
   )
 }
 
+function* skipOverIndentedLine(reader: LineReader, line: ParsedLine, contentDepth: Depth, strict: boolean): LineRule {
+  if (strict) {
+    throw overIndentedLineError(line, contentDepth)
+  }
+  assertNotScalarLine(line)
+  yield* readLine(reader)
+}
+
 // Both modes reject a bare token outside root primitive position, so it must not reach
-// the non-strict paths that drop an over-indented line.
+// the non-strict paths that drop an over-indented line. A hyphen-leading line reaching
+// here is off item depth, so it is no list item either.
 function assertNotScalarLine(line: ParsedLine): void {
-  const isListItem = line.content.startsWith(LIST_ITEM_PREFIX) || line.content === LIST_ITEM_MARKER
-  if (isListItem || findUnquotedChar(line.content, COLON) !== -1) {
+  if (findUnquotedChar(line.content, COLON) !== -1) {
     return
   }
 
@@ -262,25 +274,25 @@ function* decodeObjectFields(
       break
     }
 
-    if (computedDepth === undefined && line.depth >= baseDepth) {
-      computedDepth = line.depth
-    }
+    computedDepth ??= line.depth
 
     if (line.depth === computedDepth) {
       yield* readLine(reader)
       yield* decodeKeyValue(line, reader, computedDepth, options, seenKeys)
     }
-    else if (computedDepth !== undefined && line.depth > computedDepth) {
-      if (options.strict) {
-        throw overIndentedLineError(line, computedDepth)
-      }
-      assertNotScalarLine(line)
-      yield* readLine(reader)
-    }
     else {
-      break
+      yield* skipOverIndentedLine(reader, line, computedDepth, options.strict)
     }
   }
+}
+
+function* scopeContentDepth(reader: LineReader, baseDepth: Depth, strict: boolean): LineEffect<Depth> {
+  const first = yield* peekLine(reader)
+  if (!first || first.depth <= baseDepth + 1) {
+    return baseDepth + 1
+  }
+  assertNoDepthJump(first, baseDepth, strict)
+  return first.depth
 }
 
 function* decodeArrayFromHeader(
@@ -343,7 +355,7 @@ function* decodeKeyedObject(
   options: DecoderContext,
   headerLine: ParsedLine,
 ): LineRule {
-  const entryDepth = baseDepth + 1
+  const entryDepth = yield* scopeContentDepth(reader, baseDepth, options.strict)
   const leafFieldCount = countLeafFields(header.fields!)
   const seenEntryKeys = options.strict ? new Set<string>() : undefined
   let entryCount = 0
@@ -361,14 +373,8 @@ function* decodeKeyedObject(
       break
     }
 
-    if (line.depth > entryDepth) {
-      if (options.strict) {
-        throw new ToonDecodeError(
-          'Unexpected indentation inside keyed tabular object',
-          { line: line.lineNumber, source: line.raw },
-        )
-      }
-      yield* readLine(reader)
+    if (line.depth !== entryDepth) {
+      yield* skipOverIndentedLine(reader, line, entryDepth, options.strict)
       continue
     }
 
@@ -422,7 +428,7 @@ function* decodeTabularArray(
   options: DecoderContext,
   headerLine: ParsedLine,
 ): LineRule {
-  const rowDepth = baseDepth + 1
+  const rowDepth = yield* scopeContentDepth(reader, baseDepth, options.strict)
   let rowCount = 0
   let startLine: number | undefined
   let endLine: number | undefined
@@ -431,33 +437,33 @@ function* decodeTabularArray(
   // Only strict stops at N, leaving the surplus to `validateNoExtraTabularRows`; non-strict reads on so [N] never truncates.
   while (!options.strict || rowCount < header.length) {
     const line = yield* peekLine(reader)
-    if (!line || line.depth < rowDepth) {
+    if (!line || line.depth <= baseDepth) {
       break
     }
 
-    if (line.depth === rowDepth) {
-      if (!isDataRow(line.content, header.delimiter)) {
-        break
-      }
-
-      if (startLine === undefined) {
-        startLine = line.lineNumber
-      }
-      endLine = line.lineNumber
-      lastRowLine = line
-
-      yield* readLine(reader)
-      const values = withLine(line, () => parseDelimitedValues(line.content, header.delimiter))
-      assertExpectedCount(values.length, countLeafFields(header.fields!), 'tabular row values', options, line)
-
-      const primitives = withLine(line, () => mapRowValuesToPrimitives(values))
-      yield* yieldObjectFromFields(header.fields!, primitives)
-
-      rowCount++
+    if (line.depth !== rowDepth) {
+      yield* skipOverIndentedLine(reader, line, rowDepth, options.strict)
+      continue
     }
-    else {
+
+    if (!isDataRow(line.content, header.delimiter)) {
       break
     }
+
+    if (startLine === undefined) {
+      startLine = line.lineNumber
+    }
+    endLine = line.lineNumber
+    lastRowLine = line
+
+    yield* readLine(reader)
+    const values = withLine(line, () => parseDelimitedValues(line.content, header.delimiter))
+    assertExpectedCount(values.length, countLeafFields(header.fields!), 'tabular row values', options, line)
+
+    const primitives = withLine(line, () => mapRowValuesToPrimitives(values))
+    yield* yieldObjectFromFields(header.fields!, primitives)
+
+    rowCount++
   }
 
   assertExpectedCount(rowCount, header.length, 'tabular rows', options, lastRowLine)
@@ -479,7 +485,7 @@ function* decodeListArray(
   options: DecoderContext,
   headerLine: ParsedLine,
 ): LineRule {
-  const itemDepth = baseDepth + 1
+  const itemDepth = yield* scopeContentDepth(reader, baseDepth, options.strict)
   let itemCount = 0
   let startLine: number | undefined
   let endLine: number | undefined
@@ -488,32 +494,35 @@ function* decodeListArray(
   // Only strict stops at N, leaving the surplus to `validateNoExtraListItems`; non-strict reads on so [N] never truncates.
   while (!options.strict || itemCount < header.length) {
     const line = yield* peekLine(reader)
-    if (!line || line.depth < itemDepth) {
+    if (!line || line.depth <= baseDepth) {
       break
+    }
+
+    if (line.depth !== itemDepth) {
+      yield* skipOverIndentedLine(reader, line, itemDepth, options.strict)
+      continue
     }
 
     const isListItem = line.content.startsWith(LIST_ITEM_PREFIX) || line.content === LIST_ITEM_MARKER
-
-    if (line.depth === itemDepth && isListItem) {
-      if (startLine === undefined) {
-        startLine = line.lineNumber
-      }
-      endLine = line.lineNumber
-      lastItemLine = line
-
-      yield* decodeListItem(reader, itemDepth, options)
-
-      const lastConsumedLine = reader.lastLine
-      if (lastConsumedLine) {
-        endLine = lastConsumedLine.lineNumber
-        lastItemLine = lastConsumedLine
-      }
-
-      itemCount++
-    }
-    else {
+    if (!isListItem) {
       break
     }
+
+    if (startLine === undefined) {
+      startLine = line.lineNumber
+    }
+    endLine = line.lineNumber
+    lastItemLine = line
+
+    yield* decodeListItem(reader, itemDepth, options)
+
+    const lastConsumedLine = reader.lastLine
+    if (lastConsumedLine) {
+      endLine = lastConsumedLine.lineNumber
+      lastItemLine = lastConsumedLine
+    }
+
+    itemCount++
   }
 
   assertExpectedCount(itemCount, header.length, 'list-form items', options, lastItemLine)
@@ -627,12 +636,13 @@ function* followSiblingFields(
       break
     }
 
-    if (nextLine.depth === followDepth && !nextLine.content.startsWith(LIST_ITEM_PREFIX)) {
+    // A hyphen marks a list item only at item depth, so a `- ` line here is a further field.
+    if (nextLine.depth === followDepth) {
       yield* readLine(reader)
       yield* decodeKeyValue(nextLine, reader, followDepth, options, seenKeys)
     }
     else {
-      break
+      yield* skipOverIndentedLine(reader, nextLine, followDepth, options.strict)
     }
   }
 }
