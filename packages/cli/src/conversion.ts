@@ -83,7 +83,7 @@ export async function decodeToJson(config: {
   }
 
   const events = decodeStream(lineSource, decodeStreamOptions)
-  // Last-write-wins on duplicate keys (§14.3) needs the whole object, and strict mode rejects duplicates, so only strict mode streams.
+  // Last-write-wins on duplicate keys needs the whole object, and strict mode rejects duplicates, so only strict mode streams.
   const jsonChunks = config.strict
     ? jsonStreamFromEvents(events, config.indentSize)
     : [JSON.stringify(await buildValueFromEventsAsync(events), null, config.indentSize)]
