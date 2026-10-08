@@ -52,6 +52,20 @@ describe('JavaScript-specific type normalization', () => {
     })
   })
 
+  describe('sparse array normalization', () => {
+    it('converts holes in a primitive array to null', () => {
+      // eslint-disable-next-line no-sparse-arrays
+      const result = encode([1, , 3])
+      expect(result).toBe('[3]: 1,null,3')
+    })
+
+    it('converts holes in an array of objects to null', () => {
+      // eslint-disable-next-line no-sparse-arrays
+      const result = encode([{ x: 1 }, , { x: 2 }])
+      expect(result).toBe('[3]:\n  - x: 1\n  - null\n  - x: 2')
+    })
+  })
+
   describe('Map normalization', () => {
     it('converts Map to object', () => {
       const input = new Map([['key1', 'value1'], ['key2', 'value2']])
