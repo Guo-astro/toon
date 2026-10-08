@@ -29,7 +29,7 @@
     "test": "vitest"
   },
   "devDependencies": {
-    "tokenx": "^1.3.0",
+    "tokenx": "^2.1.1",
     "utilful": "^3.5.1"
   }
 }
